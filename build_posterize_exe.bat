@@ -1,0 +1,1 @@
+pyinstaller posterize_tool.spec

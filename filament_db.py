@@ -9,22 +9,79 @@ from pathlib import Path
 from typing import Optional, Dict, List, Tuple
 
 
+def get_default_db_path():
+    """Retourne le chemin par défaut de la base de données."""
+    import sys
+
+    # Support PyInstaller onefile avec ressources embarquées
+    if getattr(sys, 'frozen', False):
+        # PyInstaller: d'abord chercher dans _MEIPASS (ressources embarquées)
+        if hasattr(sys, '_MEIPASS'):
+            embedded_path = Path(sys._MEIPASS) / "filaments.db"
+            if embedded_path.exists():
+                return embedded_path
+        # Sinon chercher à côté de l'exécutable
+        exe_path = Path(sys.executable).parent / "filaments.db"
+        if exe_path.exists():
+            return exe_path
+        # Retourner le chemin embarqué par défaut (même s'il n'existe pas)
+        if hasattr(sys, '_MEIPASS'):
+            return Path(sys._MEIPASS) / "filaments.db"
+        return exe_path
+    else:
+        # Script Python normal
+        return Path(__file__).parent / "filaments.db"
+
+
 class FilamentDB:
     """Classe pour accéder à la base de données des filaments"""
 
-    def __init__(self, db_path: str = None):
+    def __init__(self, db_path: str = None, auto_load: bool = True):
         """
         Charge la base de données des filaments.
 
         Args:
             db_path: Chemin vers la base de données. Si None, utilise le chemin par défaut.
+            auto_load: Si True, charge automatiquement. Si False, attend un appel à load().
         """
         if db_path is None:
-            db_path = Path(__file__).parent / "filaments.db"
+            db_path = get_default_db_path()
 
         self.db_path = str(db_path)
         self.filaments: List[Dict] = []
-        self._load_database()
+        self.db_exists = False
+        self.load_error = None
+
+        if auto_load and Path(self.db_path).exists():
+            self._try_load_database()
+
+    def _try_load_database(self):
+        """Tente de charger la base de données, gère les erreurs."""
+        try:
+            self._load_database()
+            self.db_exists = True
+            self.load_error = None
+        except Exception as e:
+            self.db_exists = False
+            self.load_error = str(e)
+            self.filaments = []
+
+    def set_db_path(self, db_path: str) -> bool:
+        """
+        Définit le chemin de la base de données et la charge.
+
+        Args:
+            db_path: Chemin vers la base de données.
+
+        Returns:
+            True si la base a été chargée avec succès, False sinon.
+        """
+        self.db_path = str(db_path)
+        if Path(self.db_path).exists():
+            self._try_load_database()
+            return self.db_exists
+        self.db_exists = False
+        return False
 
     def _load_database(self):
         """Charge tous les filaments depuis la base de données"""

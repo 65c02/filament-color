@@ -23,8 +23,20 @@ import io
 from filament_db import FilamentDB
 
 
+def get_app_dir():
+    """Retourne le répertoire de l'application (compatible PyInstaller)."""
+    if getattr(sys, 'frozen', False):
+        # Exécutable PyInstaller
+        return Path(sys.executable).parent
+    else:
+        # Script Python normal
+        return Path(__file__).parent
+
+
 # Fichier de sauvegarde des sélections
-SELECTION_FILE = Path(__file__).parent / "filament_selection.json"
+SELECTION_FILE = get_app_dir() / "filament_selection.json"
+# Fichier de sauvegarde du chemin de la base de données
+DB_PATH_FILE = get_app_dir() / "filament_db_path.json"
 
 
 class ZoomableImageLabel(QLabel):
@@ -155,12 +167,79 @@ class PosterizeWindow(QMainWindow):
         super().__init__()
         self.original_image = None
         self.posterized_image = None
-        self.filament_db = FilamentDB()
+        self.filament_db = None
         self.palette_mapping = []
         self.filament_selection = {}  # {filament_id: bool}
         self.filament_checkboxes = {}  # {filament_id: QCheckBox}
+
+        # Charger la base de données
+        if not self.load_filament_db():
+            # Si pas de base, on initialise quand même l'UI
+            self.filament_db = FilamentDB(auto_load=False)
+
         self.load_selection()
         self.init_ui()
+
+    def load_filament_db(self) -> bool:
+        """Charge la base de données des filaments."""
+        # Essayer de charger le chemin sauvegardé
+        saved_path = None
+        if DB_PATH_FILE.exists():
+            try:
+                with open(DB_PATH_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    saved_path = data.get('db_path')
+            except Exception:
+                pass
+
+        # Essayer le chemin sauvegardé
+        if saved_path and Path(saved_path).exists():
+            self.filament_db = FilamentDB(db_path=saved_path)
+            if self.filament_db.db_exists:
+                return True
+
+        # Essayer le chemin par défaut
+        self.filament_db = FilamentDB()
+        if self.filament_db.db_exists:
+            return True
+
+        return False
+
+    def choose_database(self):
+        """Ouvre un dialogue pour choisir la base de données."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Choisir la base de données des filaments",
+            "",
+            "Base de données SQLite (*.db);;Tous les fichiers (*)"
+        )
+
+        if file_path:
+            if self.filament_db.set_db_path(file_path):
+                # Sauvegarder le chemin
+                try:
+                    with open(DB_PATH_FILE, 'w', encoding='utf-8') as f:
+                        json.dump({'db_path': file_path}, f)
+                except Exception:
+                    pass
+
+                # Recharger les sélections et la table
+                self.filament_selection = {}
+                self.load_selection()
+                self.populate_filaments_table()
+                self.update_filament_count_label()
+                self.update_db_info_label()
+
+                QMessageBox.information(
+                    self, "Succès",
+                    f"Base de données chargée:\n{file_path}\n\n"
+                    f"{self.filament_db.count()} filaments trouvés."
+                )
+            else:
+                QMessageBox.critical(
+                    self, "Erreur",
+                    f"Impossible de charger la base de données:\n{file_path}"
+                )
 
     def load_selection(self):
         """Charge les sélections depuis le fichier JSON."""
@@ -173,10 +252,11 @@ class PosterizeWindow(QMainWindow):
                 self.filament_selection = {}
 
         # Initialiser les filaments non présents à True (sélectionné par défaut)
-        for filament in self.filament_db.filaments:
-            fid = filament.get('id')
-            if fid not in self.filament_selection:
-                self.filament_selection[fid] = True
+        if self.filament_db and self.filament_db.filaments:
+            for filament in self.filament_db.filaments:
+                fid = filament.get('id')
+                if fid not in self.filament_selection:
+                    self.filament_selection[fid] = True
 
     def save_selection(self):
         """Sauvegarde les sélections dans le fichier JSON."""
@@ -194,6 +274,8 @@ class PosterizeWindow(QMainWindow):
 
     def get_selected_filaments(self):
         """Retourne la liste des filaments sélectionnés."""
+        if not self.filament_db or not self.filament_db.filaments:
+            return []
         return [
             f for f in self.filament_db.filaments
             if self.filament_selection.get(f.get('id'), True)
@@ -337,6 +419,13 @@ class PosterizeWindow(QMainWindow):
 
         # Boutons de sélection
         btn_layout = QHBoxLayout()
+
+        choose_db_btn = QPushButton("Choisir base de données...")
+        choose_db_btn.clicked.connect(self.choose_database)
+        btn_layout.addWidget(choose_db_btn)
+
+        btn_layout.addWidget(QLabel("  |  "))
+
         select_all_btn = QPushButton("Tout sélectionner")
         select_all_btn.clicked.connect(self.select_all_filaments)
         btn_layout.addWidget(select_all_btn)
@@ -346,7 +435,22 @@ class PosterizeWindow(QMainWindow):
         btn_layout.addWidget(deselect_all_btn)
 
         btn_layout.addStretch()
+
+        # Info base de données
+        self.db_info_label = QLabel()
+        self.update_db_info_label()
+        btn_layout.addWidget(self.db_info_label)
+
         layout.addLayout(btn_layout)
+
+        # Message si pas de base de données
+        self.no_db_label = QLabel(
+            "Aucune base de données chargée.\n"
+            "Cliquez sur 'Choisir base de données...' pour sélectionner un fichier."
+        )
+        self.no_db_label.setAlignment(Qt.AlignCenter)
+        self.no_db_label.setStyleSheet("color: #888; font-size: 14px; padding: 50px;")
+        layout.addWidget(self.no_db_label)
 
         # Table des filaments
         self.filaments_table = QTableWidget()
@@ -370,9 +474,29 @@ class PosterizeWindow(QMainWindow):
         # Remplir la table
         self.populate_filaments_table()
 
+    def update_db_info_label(self):
+        """Met à jour le label d'info de la base de données."""
+        if self.filament_db and self.filament_db.db_exists:
+            db_name = Path(self.filament_db.db_path).name
+            self.db_info_label.setText(f"Base: {db_name}")
+            self.db_info_label.setStyleSheet("color: green;")
+        else:
+            self.db_info_label.setText("Aucune base")
+            self.db_info_label.setStyleSheet("color: red;")
+
     def populate_filaments_table(self):
         """Remplit la table des filaments."""
-        filaments = self.filament_db.filaments
+        # Vider les checkboxes existantes
+        self.filament_checkboxes.clear()
+
+        filaments = self.filament_db.filaments if self.filament_db else []
+
+        # Afficher/masquer le message "pas de base"
+        if hasattr(self, 'no_db_label'):
+            self.no_db_label.setVisible(len(filaments) == 0)
+        if hasattr(self, 'filaments_table'):
+            self.filaments_table.setVisible(len(filaments) > 0)
+
         self.filaments_table.setRowCount(len(filaments))
 
         for row, filament in enumerate(filaments):
@@ -430,9 +554,12 @@ class PosterizeWindow(QMainWindow):
 
     def update_filament_count_label(self):
         """Met à jour le label du nombre de filaments sélectionnés."""
-        selected = len(self.get_selected_filaments())
-        total = self.filament_db.count()
-        self.filament_count_label.setText(f"| Filaments: {selected}/{total}")
+        if self.filament_db and self.filament_db.db_exists:
+            selected = len(self.get_selected_filaments())
+            total = self.filament_db.count()
+            self.filament_count_label.setText(f"| Filaments: {selected}/{total}")
+        else:
+            self.filament_count_label.setText("| Aucune base de données")
 
     def load_image(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -471,6 +598,16 @@ class PosterizeWindow(QMainWindow):
 
     def posterize_image(self):
         if self.original_image is None:
+            return
+
+        # Vérifier qu'une base de données est chargée
+        if not self.filament_db or not self.filament_db.db_exists:
+            QMessageBox.warning(
+                self, "Attention",
+                "Aucune base de données chargée.\n"
+                "Veuillez choisir une base de données dans l'onglet 'Filaments'."
+            )
+            self.tabs.setCurrentWidget(self.filaments_tab)
             return
 
         # Vérifier qu'il y a des filaments sélectionnés
