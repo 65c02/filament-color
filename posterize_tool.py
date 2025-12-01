@@ -7,11 +7,13 @@ snapper sur les couleurs de filaments et exporter le résultat.
 
 import sys
 import json
+import math
 from pathlib import Path
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QSpinBox, QFileDialog, QScrollArea, QGroupBox,
-    QSizePolicy, QMessageBox, QTableWidget, QTableWidgetItem, QHeaderView
+    QPushButton, QLabel, QSpinBox, QFileDialog, QGroupBox,
+    QSizePolicy, QMessageBox, QTableWidget, QTableWidgetItem, QHeaderView,
+    QTabWidget, QCheckBox
 )
 from PyQt5.QtGui import QPixmap, QImage, QColor, QPainter
 from PyQt5.QtCore import Qt, QPoint
@@ -19,6 +21,10 @@ from PIL import Image
 import io
 
 from filament_db import FilamentDB
+
+
+# Fichier de sauvegarde des sélections
+SELECTION_FILE = Path(__file__).parent / "filament_selection.json"
 
 
 class ZoomableImageLabel(QLabel):
@@ -47,7 +53,6 @@ class ZoomableImageLabel(QLabel):
         if self.original_pixmap is None or self.original_pixmap.isNull():
             return
 
-        # Calculer le zoom pour tenir dans l'espace disponible
         available_w = self.width() - 4
         available_h = self.height() - 4
 
@@ -77,7 +82,6 @@ class ZoomableImageLabel(QLabel):
             Qt.FastTransformation
         )
 
-        # Créer un pixmap avec l'offset
         result = QPixmap(self.size())
         result.fill(Qt.transparent)
 
@@ -94,7 +98,6 @@ class ZoomableImageLabel(QLabel):
         if self.original_pixmap is None:
             return
 
-        # Facteur de zoom
         delta = event.angleDelta().y()
         if delta > 0:
             factor = 1.2
@@ -104,15 +107,10 @@ class ZoomableImageLabel(QLabel):
         new_zoom = self.zoom_level * factor
         new_zoom = max(self.min_zoom, min(self.max_zoom, new_zoom))
 
-        # Ajuster l'offset pour zoomer vers le curseur
         if new_zoom != self.zoom_level:
             mouse_pos = event.pos()
             center = QPoint(self.width() // 2, self.height() // 2)
-
-            # Position relative au centre de l'image
             rel_pos = mouse_pos - center - self.offset
-
-            # Ajuster l'offset
             scale_change = new_zoom / self.zoom_level
             new_rel_pos = rel_pos * scale_change
             self.offset = self.offset - (new_rel_pos - rel_pos)
@@ -158,8 +156,73 @@ class PosterizeWindow(QMainWindow):
         self.original_image = None
         self.posterized_image = None
         self.filament_db = FilamentDB()
-        self.palette_mapping = []  # Liste de {index, filament, original_color, snapped_color}
+        self.palette_mapping = []
+        self.filament_selection = {}  # {filament_id: bool}
+        self.filament_checkboxes = {}  # {filament_id: QCheckBox}
+        self.load_selection()
         self.init_ui()
+
+    def load_selection(self):
+        """Charge les sélections depuis le fichier JSON."""
+        if SELECTION_FILE.exists():
+            try:
+                with open(SELECTION_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    self.filament_selection = {int(k): v for k, v in data.items()}
+            except Exception:
+                self.filament_selection = {}
+
+        # Initialiser les filaments non présents à True (sélectionné par défaut)
+        for filament in self.filament_db.filaments:
+            fid = filament.get('id')
+            if fid not in self.filament_selection:
+                self.filament_selection[fid] = True
+
+    def save_selection(self):
+        """Sauvegarde les sélections dans le fichier JSON."""
+        try:
+            with open(SELECTION_FILE, 'w', encoding='utf-8') as f:
+                json.dump(self.filament_selection, f, indent=2)
+        except Exception as e:
+            print(f"Erreur sauvegarde sélection: {e}")
+
+    def on_filament_checkbox_changed(self, filament_id, state):
+        """Callback quand un checkbox de filament change."""
+        self.filament_selection[filament_id] = (state == Qt.Checked)
+        self.save_selection()
+        self.update_filament_count_label()
+
+    def get_selected_filaments(self):
+        """Retourne la liste des filaments sélectionnés."""
+        return [
+            f for f in self.filament_db.filaments
+            if self.filament_selection.get(f.get('id'), True)
+        ]
+
+    def find_closest_color_in_selection(self, r, g, b):
+        """Trouve le filament le plus proche parmi les sélectionnés."""
+        selected = self.get_selected_filaments()
+        if not selected:
+            return None
+
+        closest = None
+        min_distance = float('inf')
+
+        for filament in selected:
+            fr = filament.get('rgb_r')
+            fg = filament.get('rgb_g')
+            fb = filament.get('rgb_b')
+
+            if fr is None or fg is None or fb is None:
+                continue
+
+            distance = math.sqrt((r - fr) ** 2 + (g - fg) ** 2 + (b - fb) ** 2)
+
+            if distance < min_distance:
+                min_distance = distance
+                closest = filament
+
+        return closest
 
     def init_ui(self):
         self.setWindowTitle("Posterize - Réduction de couleurs (Filaments)")
@@ -169,16 +232,32 @@ class PosterizeWindow(QMainWindow):
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
 
+        # Onglets
+        self.tabs = QTabWidget()
+        main_layout.addWidget(self.tabs)
+
+        # Onglet Image
+        self.image_tab = QWidget()
+        self.init_image_tab()
+        self.tabs.addTab(self.image_tab, "Image")
+
+        # Onglet Filaments
+        self.filaments_tab = QWidget()
+        self.init_filaments_tab()
+        self.tabs.addTab(self.filaments_tab, "Filaments")
+
+    def init_image_tab(self):
+        """Initialise l'onglet Image."""
+        layout = QVBoxLayout(self.image_tab)
+
         # Contrôles
         controls_group = QGroupBox("Contrôles")
         controls_layout = QHBoxLayout(controls_group)
 
-        # Bouton charger
         self.load_btn = QPushButton("Charger image")
         self.load_btn.clicked.connect(self.load_image)
         controls_layout.addWidget(self.load_btn)
 
-        # Sélecteur nombre de couleurs
         controls_layout.addWidget(QLabel("Nombre de couleurs:"))
         self.color_spinbox = QSpinBox()
         self.color_spinbox.setRange(2, 256)
@@ -186,24 +265,22 @@ class PosterizeWindow(QMainWindow):
         self.color_spinbox.valueChanged.connect(self.on_color_change)
         controls_layout.addWidget(self.color_spinbox)
 
-        # Bouton posteriser
         self.posterize_btn = QPushButton("Posteriser")
         self.posterize_btn.clicked.connect(self.posterize_image)
         self.posterize_btn.setEnabled(False)
         controls_layout.addWidget(self.posterize_btn)
 
-        # Bouton exporter
         self.export_btn = QPushButton("Exporter")
         self.export_btn.clicked.connect(self.export_image)
         self.export_btn.setEnabled(False)
         controls_layout.addWidget(self.export_btn)
 
-        # Info filaments
-        filament_count = self.filament_db.count()
-        controls_layout.addWidget(QLabel(f"| Filaments disponibles: {filament_count}"))
+        self.filament_count_label = QLabel()
+        self.update_filament_count_label()
+        controls_layout.addWidget(self.filament_count_label)
 
         controls_layout.addStretch()
-        main_layout.addWidget(controls_group)
+        layout.addWidget(controls_group)
 
         # Zone d'affichage des images
         images_layout = QHBoxLayout()
@@ -228,7 +305,7 @@ class PosterizeWindow(QMainWindow):
         posterized_layout.addWidget(self.posterized_info)
         images_layout.addWidget(posterized_group)
 
-        main_layout.addLayout(images_layout)
+        layout.addLayout(images_layout)
 
         # Table des correspondances couleurs/filaments
         mapping_group = QGroupBox("Correspondances Palette → Filaments")
@@ -240,19 +317,122 @@ class PosterizeWindow(QMainWindow):
             "Index", "Couleur originale", "Couleur filament", "Nom filament", "Fabricant", "Type"
         ])
         header = self.mapping_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # Index
-        header.setSectionResizeMode(1, QHeaderView.Fixed)  # Couleur originale
-        header.setSectionResizeMode(2, QHeaderView.Fixed)  # Couleur filament
-        header.setSectionResizeMode(3, QHeaderView.Stretch)  # Nom filament
-        header.setSectionResizeMode(4, QHeaderView.Fixed)  # Fabricant
-        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)  # Type
-        self.mapping_table.setColumnWidth(1, 115)  # Couleur originale
-        self.mapping_table.setColumnWidth(2, 115)  # Couleur filament
-        self.mapping_table.setColumnWidth(4, 92)   # Fabricant
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.Fixed)
+        header.setSectionResizeMode(2, QHeaderView.Fixed)
+        header.setSectionResizeMode(3, QHeaderView.Stretch)
+        header.setSectionResizeMode(4, QHeaderView.Fixed)
+        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        self.mapping_table.setColumnWidth(1, 115)
+        self.mapping_table.setColumnWidth(2, 115)
+        self.mapping_table.setColumnWidth(4, 92)
         self.mapping_table.setMaximumHeight(200)
         mapping_layout.addWidget(self.mapping_table)
 
-        main_layout.addWidget(mapping_group)
+        layout.addWidget(mapping_group)
+
+    def init_filaments_tab(self):
+        """Initialise l'onglet Filaments."""
+        layout = QVBoxLayout(self.filaments_tab)
+
+        # Boutons de sélection
+        btn_layout = QHBoxLayout()
+        select_all_btn = QPushButton("Tout sélectionner")
+        select_all_btn.clicked.connect(self.select_all_filaments)
+        btn_layout.addWidget(select_all_btn)
+
+        deselect_all_btn = QPushButton("Tout désélectionner")
+        deselect_all_btn.clicked.connect(self.deselect_all_filaments)
+        btn_layout.addWidget(deselect_all_btn)
+
+        btn_layout.addStretch()
+        layout.addLayout(btn_layout)
+
+        # Table des filaments
+        self.filaments_table = QTableWidget()
+        self.filaments_table.setColumnCount(6)
+        self.filaments_table.setHorizontalHeaderLabels([
+            "", "ID", "Couleur", "Nom", "Fabricant", "Type"
+        ])
+
+        header = self.filaments_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # Checkbox
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)  # ID
+        header.setSectionResizeMode(2, QHeaderView.Fixed)  # Couleur
+        header.setSectionResizeMode(3, QHeaderView.Stretch)  # Nom
+        header.setSectionResizeMode(4, QHeaderView.Fixed)  # Fabricant
+        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)  # Type
+        self.filaments_table.setColumnWidth(2, 100)
+        self.filaments_table.setColumnWidth(4, 100)
+
+        layout.addWidget(self.filaments_table)
+
+        # Remplir la table
+        self.populate_filaments_table()
+
+    def populate_filaments_table(self):
+        """Remplit la table des filaments."""
+        filaments = self.filament_db.filaments
+        self.filaments_table.setRowCount(len(filaments))
+
+        for row, filament in enumerate(filaments):
+            fid = filament.get('id')
+
+            # Checkbox
+            checkbox = QCheckBox()
+            checkbox.setChecked(self.filament_selection.get(fid, True))
+            checkbox.stateChanged.connect(
+                lambda state, fid=fid: self.on_filament_checkbox_changed(fid, state)
+            )
+            self.filament_checkboxes[fid] = checkbox
+
+            checkbox_widget = QWidget()
+            checkbox_layout = QHBoxLayout(checkbox_widget)
+            checkbox_layout.addWidget(checkbox)
+            checkbox_layout.setAlignment(Qt.AlignCenter)
+            checkbox_layout.setContentsMargins(0, 0, 0, 0)
+            self.filaments_table.setCellWidget(row, 0, checkbox_widget)
+
+            # ID
+            self.filaments_table.setItem(row, 1, QTableWidgetItem(str(fid)))
+
+            # Couleur
+            r = filament.get('rgb_r', 128)
+            g = filament.get('rgb_g', 128)
+            b = filament.get('rgb_b', 128)
+            hex_color = filament.get('hex_color', '')
+            color_item = QTableWidgetItem(hex_color)
+            color_item.setBackground(QColor(r, g, b))
+            if (r * 0.299 + g * 0.587 + b * 0.114) > 150:
+                color_item.setForeground(QColor(0, 0, 0))
+            else:
+                color_item.setForeground(QColor(255, 255, 255))
+            self.filaments_table.setItem(row, 2, color_item)
+
+            # Nom
+            self.filaments_table.setItem(row, 3, QTableWidgetItem(filament.get('name', '')))
+
+            # Fabricant
+            self.filaments_table.setItem(row, 4, QTableWidgetItem(filament.get('manufacturer', '')))
+
+            # Type
+            self.filaments_table.setItem(row, 5, QTableWidgetItem(filament.get('material_type', '')))
+
+    def select_all_filaments(self):
+        """Sélectionne tous les filaments."""
+        for fid, checkbox in self.filament_checkboxes.items():
+            checkbox.setChecked(True)
+
+    def deselect_all_filaments(self):
+        """Désélectionne tous les filaments."""
+        for fid, checkbox in self.filament_checkboxes.items():
+            checkbox.setChecked(False)
+
+    def update_filament_count_label(self):
+        """Met à jour le label du nombre de filaments sélectionnés."""
+        selected = len(self.get_selected_filaments())
+        total = self.filament_db.count()
+        self.filament_count_label.setText(f"| Filaments: {selected}/{total}")
 
     def load_image(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -264,7 +444,6 @@ class PosterizeWindow(QMainWindow):
         if file_path:
             try:
                 self.original_image = Image.open(file_path)
-                # Convertir en RGB si nécessaire
                 if self.original_image.mode in ('RGBA', 'LA'):
                     background = Image.new('RGB', self.original_image.size, (255, 255, 255))
                     if self.original_image.mode == 'RGBA':
@@ -294,39 +473,43 @@ class PosterizeWindow(QMainWindow):
         if self.original_image is None:
             return
 
+        # Vérifier qu'il y a des filaments sélectionnés
+        if not self.get_selected_filaments():
+            QMessageBox.warning(
+                self, "Attention",
+                "Aucun filament sélectionné.\nVeuillez sélectionner des filaments dans l'onglet 'Filaments'."
+            )
+            return
+
         num_colors = self.color_spinbox.value()
 
         try:
-            # Étape 1: Quantification pour réduire à N couleurs
             quantized = self.original_image.quantize(
                 colors=num_colors,
                 method=Image.Quantize.MEDIANCUT,
                 dither=Image.Dither.NONE
             )
 
-            # Étape 2: Extraire la palette et mapper vers les couleurs de filaments
             palette = quantized.getpalette()
             used_indices = set(quantized.getdata())
 
             self.palette_mapping = []
-            new_palette = list(palette)  # Copie de la palette
+            new_palette = list(palette)
 
             for idx in sorted(used_indices):
                 if idx < len(palette) // 3:
-                    # Couleur originale de la palette
                     orig_r = palette[idx * 3]
                     orig_g = palette[idx * 3 + 1]
                     orig_b = palette[idx * 3 + 2]
 
-                    # Trouver le filament le plus proche
-                    filament = self.filament_db.find_closest_color(orig_r, orig_g, orig_b)
+                    # Trouver le filament le plus proche parmi les sélectionnés
+                    filament = self.find_closest_color_in_selection(orig_r, orig_g, orig_b)
 
                     if filament:
                         snap_r = filament.get('rgb_r', orig_r)
                         snap_g = filament.get('rgb_g', orig_g)
                         snap_b = filament.get('rgb_b', orig_b)
 
-                        # Mettre à jour la palette avec la couleur du filament
                         new_palette[idx * 3] = snap_r
                         new_palette[idx * 3 + 1] = snap_g
                         new_palette[idx * 3 + 2] = snap_b
@@ -344,7 +527,6 @@ class PosterizeWindow(QMainWindow):
                             }
                         })
                     else:
-                        # Pas de filament trouvé, garder la couleur originale
                         self.palette_mapping.append({
                             'index': idx,
                             'original_color': {'r': orig_r, 'g': orig_g, 'b': orig_b},
@@ -352,11 +534,9 @@ class PosterizeWindow(QMainWindow):
                             'filament': None
                         })
 
-            # Appliquer la nouvelle palette à l'image
             quantized.putpalette(new_palette)
             self.posterized_image = quantized
 
-            # Afficher l'image posterisée
             display_img = self.posterized_image.convert('RGB')
             self.display_image(display_img, self.posterized_label)
 
@@ -376,21 +556,17 @@ class PosterizeWindow(QMainWindow):
         self.mapping_table.setRowCount(len(self.palette_mapping))
 
         for row, mapping in enumerate(self.palette_mapping):
-            # Index
             self.mapping_table.setItem(row, 0, QTableWidgetItem(str(mapping['index'])))
 
-            # Couleur originale
             orig = mapping['original_color']
             orig_item = QTableWidgetItem(f"RGB({orig['r']}, {orig['g']}, {orig['b']})")
             orig_item.setBackground(QColor(orig['r'], orig['g'], orig['b']))
-            # Texte contrasté
             if (orig['r'] * 0.299 + orig['g'] * 0.587 + orig['b'] * 0.114) > 150:
                 orig_item.setForeground(QColor(0, 0, 0))
             else:
                 orig_item.setForeground(QColor(255, 255, 255))
             self.mapping_table.setItem(row, 1, orig_item)
 
-            # Couleur filament
             snap = mapping['snapped_color']
             snap_item = QTableWidgetItem(f"RGB({snap['r']}, {snap['g']}, {snap['b']})")
             snap_item.setBackground(QColor(snap['r'], snap['g'], snap['b']))
@@ -400,7 +576,6 @@ class PosterizeWindow(QMainWindow):
                 snap_item.setForeground(QColor(255, 255, 255))
             self.mapping_table.setItem(row, 2, snap_item)
 
-            # Info filament
             filament = mapping['filament']
             if filament:
                 self.mapping_table.setItem(row, 3, QTableWidgetItem(filament.get('name', '')))
@@ -436,7 +611,6 @@ class PosterizeWindow(QMainWindow):
 
         if file_path:
             try:
-                # Ajouter l'extension si manquante
                 path = Path(file_path)
                 if not path.suffix:
                     if "PNG" in selected_filter:
@@ -448,10 +622,8 @@ class PosterizeWindow(QMainWindow):
                     elif "TIFF" in selected_filter:
                         file_path += ".tiff"
 
-                # Sauvegarder l'image
                 self.posterized_image.save(file_path)
 
-                # Créer le fichier JSON avec les correspondances
                 json_path = Path(file_path).with_suffix('.json')
 
                 export_data = {
