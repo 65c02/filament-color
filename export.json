@@ -1,0 +1,86 @@
+{
+  "image_file": "export.png",
+  "num_colors": 4,
+  "palette_mapping": [
+    {
+      "palette_index": 0,
+      "original_rgb": [
+        227,
+        210,
+        216
+      ],
+      "filament_rgb": [
+        228,
+        213,
+        211
+      ],
+      "filament": {
+        "id": 1484,
+        "name": "3DXTECH - Simubone PLA",
+        "manufacturer": "FilamentColors",
+        "material_type": "PLA",
+        "hex_color": "#E4D5D3"
+      }
+    },
+    {
+      "palette_index": 1,
+      "original_rgb": [
+        120,
+        146,
+        160
+      ],
+      "filament_rgb": [
+        130,
+        153,
+        149
+      ],
+      "filament": {
+        "id": 1663,
+        "name": "Atomic Filament - Silky Offshore Mist PLA",
+        "manufacturer": "FilamentColors",
+        "material_type": "PLA",
+        "hex_color": "#829995"
+      }
+    },
+    {
+      "palette_index": 2,
+      "original_rgb": [
+        88,
+        95,
+        196
+      ],
+      "filament_rgb": [
+        104,
+        91,
+        199
+      ],
+      "filament": {
+        "id": 806,
+        "name": "COEX - Lilac Purple PLA",
+        "manufacturer": "FilamentColors",
+        "material_type": "PLA",
+        "hex_color": "#685BC7"
+      }
+    },
+    {
+      "palette_index": 3,
+      "original_rgb": [
+        69,
+        16,
+        77
+      ],
+      "filament_rgb": [
+        63,
+        42,
+        86
+      ],
+      "filament": {
+        "id": 535,
+        "name": "COEX - Plum Purple PLA",
+        "manufacturer": "FilamentColors",
+        "material_type": "PLA",
+        "hex_color": "#3F2A56"
+      }
+    }
+  ]
+}
